@@ -50,71 +50,24 @@ export const DEFAULT_PREFERENCES: UserPreferences = {
   fontSize: 'md',
 };
 
-const DB_NAME = 'RollercosterDB';
-const DB_VERSION = 1;
-const STORE_ENTRIES = 'entries';
-const STORE_PREFS = 'preferences';
-
-function openDB(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    if (typeof window === 'undefined') {
-      return reject(new Error('IndexedDB is only available in browser environments.'));
-    }
-
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-
-    request.onupgradeneeded = (event) => {
-      const db = (event.target as IDBOpenDBRequest).result;
-      if (!db.objectStoreNames.contains(STORE_ENTRIES)) {
-        const entryStore = db.createObjectStore(STORE_ENTRIES, { keyPath: 'date' });
-        entryStore.createIndex('id', 'id', { unique: true });
-        entryStore.createIndex('updatedAt', 'updatedAt', { unique: false });
-      }
-      if (!db.objectStoreNames.contains(STORE_PREFS)) {
-        db.createObjectStore(STORE_PREFS, { keyPath: 'key' });
-      }
-    };
-
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
 export async function getAllEntries(): Promise<DiaryEntry[]> {
   try {
-    const db = await openDB();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE_ENTRIES, 'readonly');
-      const store = tx.objectStore(STORE_ENTRIES);
-      const request = store.getAll();
-
-      request.onsuccess = () => {
-        const entries = (request.result as DiaryEntry[]) || [];
-        // Sort by date descending
-        entries.sort((a, b) => b.date.localeCompare(a.date));
-        resolve(entries);
-      };
-      request.onerror = () => reject(request.error);
-    });
+    const res = await fetch('/api/entries', { cache: 'no-store' });
+    if (!res.ok) throw new Error('Failed to fetch entries');
+    const entries = await res.json();
+    return Array.isArray(entries) ? entries : [];
   } catch (err) {
-    console.error('Error fetching all entries:', err);
+    console.error('Error fetching all entries from database API:', err);
     return [];
   }
 }
 
 export async function getEntryByDate(date: string): Promise<DiaryEntry | null> {
   try {
-    const db = await openDB();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE_ENTRIES, 'readonly');
-      const store = tx.objectStore(STORE_ENTRIES);
-      const request = store.get(date);
-
-      request.onsuccess = () => {
-        resolve((request.result as DiaryEntry) || null);
-      };
-      request.onerror = () => reject(request.error);
-    });
+    const res = await fetch(`/api/entries?date=${encodeURIComponent(date)}`, { cache: 'no-store' });
+    if (!res.ok) return null;
+    const entry = await res.json();
+    return entry || null;
   } catch (err) {
     console.error(`Error fetching entry for date ${date}:`, err);
     return null;
@@ -127,39 +80,28 @@ export async function saveEntry(data: {
   content: string;
   id?: string;
 }): Promise<DiaryEntry> {
-  const db = await openDB();
-  const existing = await getEntryByDate(data.date);
-  const now = new Date().toISOString();
-
-  const entryToSave: DiaryEntry = {
-    id: existing?.id || data.id || `entry_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-    date: data.date,
-    title: data.title !== undefined ? data.title.trim() : existing?.title || '',
-    content: data.content,
-    createdAt: existing?.createdAt || now,
-    updatedAt: now,
-  };
-
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_ENTRIES, 'readwrite');
-    const store = tx.objectStore(STORE_ENTRIES);
-    const request = store.put(entryToSave);
-
-    request.onsuccess = () => resolve(entryToSave);
-    request.onerror = () => reject(request.error);
+  const res = await fetch('/api/entries', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
   });
+
+  if (!res.ok) {
+    throw new Error('Failed to save entry to database');
+  }
+
+  const saved = await res.json();
+  return saved;
 }
 
 export async function deleteEntry(date: string): Promise<void> {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_ENTRIES, 'readwrite');
-    const store = tx.objectStore(STORE_ENTRIES);
-    const request = store.delete(date);
-
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
+  const res = await fetch(`/api/entries?date=${encodeURIComponent(date)}`, {
+    method: 'DELETE',
   });
+
+  if (!res.ok) {
+    throw new Error('Failed to delete entry from database');
+  }
 }
 
 export async function getDatesWithEntries(): Promise<string[]> {
@@ -187,7 +129,6 @@ export async function importDiaryData(jsonData: string): Promise<{ imported: num
     throw new Error('Invalid Rollercoster backup file format.');
   }
 
-  const db = await openDB();
   let imported = 0;
   let updated = 0;
 
@@ -200,21 +141,11 @@ export async function importDiaryData(jsonData: string): Promise<{ imported: num
       imported++;
     }
 
-    const cleanEntry: DiaryEntry = {
-      id: entry.id || `entry_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+    await saveEntry({
       date: entry.date,
       title: entry.title || '',
       content: entry.content || '',
-      createdAt: entry.createdAt || new Date().toISOString(),
-      updatedAt: entry.updatedAt || new Date().toISOString(),
-    };
-
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE_ENTRIES, 'readwrite');
-      const store = tx.objectStore(STORE_ENTRIES);
-      const request = store.put(cleanEntry);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
+      id: entry.id,
     });
   }
 
@@ -227,34 +158,26 @@ export async function importDiaryData(jsonData: string): Promise<{ imported: num
 
 export async function getPreferences(): Promise<UserPreferences> {
   try {
-    const db = await openDB();
-    return new Promise((resolve) => {
-      const tx = db.transaction(STORE_PREFS, 'readonly');
-      const store = tx.objectStore(STORE_PREFS);
-      const request = store.get('user_prefs');
-
-      request.onsuccess = () => {
-        if (request.result && request.result.value) {
-          resolve({ ...DEFAULT_PREFERENCES, ...request.result.value });
-        } else {
-          // Check localStorage as fallback
-          const localStr = typeof window !== 'undefined' ? localStorage.getItem('rollercoster_prefs') : null;
-          if (localStr) {
-            try {
-              resolve({ ...DEFAULT_PREFERENCES, ...JSON.parse(localStr) });
-              return;
-            } catch (e) {
-              // ignore JSON parse error
-            }
-          }
-          resolve(DEFAULT_PREFERENCES);
-        }
-      };
-      request.onerror = () => resolve(DEFAULT_PREFERENCES);
-    });
+    const res = await fetch('/api/preferences', { cache: 'no-store' });
+    if (res.ok) {
+      const data = await res.json();
+      if (data) return { ...DEFAULT_PREFERENCES, ...data };
+    }
   } catch (err) {
-    return DEFAULT_PREFERENCES;
+    console.error('Error fetching preferences from API:', err);
   }
+
+  // Fallback to localStorage if API is unreachable
+  if (typeof window !== 'undefined') {
+    const localStr = localStorage.getItem('rollercoster_prefs');
+    if (localStr) {
+      try {
+        return { ...DEFAULT_PREFERENCES, ...JSON.parse(localStr) };
+      } catch (e) {}
+    }
+  }
+
+  return DEFAULT_PREFERENCES;
 }
 
 export async function savePreferences(prefs: UserPreferences): Promise<void> {
@@ -262,16 +185,12 @@ export async function savePreferences(prefs: UserPreferences): Promise<void> {
     localStorage.setItem('rollercoster_prefs', JSON.stringify(prefs));
   }
   try {
-    const db = await openDB();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE_PREFS, 'readwrite');
-      const store = tx.objectStore(STORE_PREFS);
-      const request = store.put({ key: 'user_prefs', value: prefs });
-
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
+    await fetch('/api/preferences', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(prefs),
     });
   } catch (err) {
-    console.error('Error saving preferences to IndexedDB:', err);
+    console.error('Error saving preferences to database API:', err);
   }
 }
